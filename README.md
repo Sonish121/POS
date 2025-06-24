@@ -34,3 +34,4 @@ The system comes with the following test credentials:
 - POS interface # POS
 #POS
 # POS
+# POS

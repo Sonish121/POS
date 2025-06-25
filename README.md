@@ -21,21 +21,22 @@ npm start
 
 The application will open in your default browser at `http://localhost:3000`
 
+
+
+## 🖼️ Screenshots
+
+![Opening Page](src/font/screen.png)
+![Main Page1](src/font/item.png)
+![Main Page2](src/font/main.png)
+
 ## Login Credentials
 
 The system comes with the following test credentials:
 
 - Username: sonish, Password: test
 
-## 🖼️ Screenshots
-
-![Opening Page](src/font/screen.png)
-
 ## Features
 
 - User authentication
 - Billing system
-- POS interface # POS
-#POS
-# POS
-# POS
+- POS interface 

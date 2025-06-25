@@ -27,6 +27,10 @@ The system comes with the following test credentials:
 
 - Username: sonish, Password: test
 
+## 🖼️ Screenshots
+
+![Opening Page](src/font/screen.png)
+
 ## Features
 
 - User authentication

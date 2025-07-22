@@ -1,8 +1,14 @@
-//date=april12
+//backup date :2025-06-26
+//backup file : Billing.js
+//comment all the code and add comments to the code   
+
+
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import jsPDF from 'jspdf';
 import styles from './style'
+import Select from 'react-select';
+import CreatableSelect from 'react-select/creatable';
 // Import custom font to support Devanagari script (Nepali)
 import "jspdf-autotable";
 import { fontLoader } from 'jspdf';
@@ -21,9 +27,6 @@ function Billing({ username }) {
   // State for item management
   const [items, setItems] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
-  const [customItemName, setCustomItemName] = useState('');
-  const [customItemPrice, setCustomItemPrice] = useState('');
-  const [customItemImage, setCustomItemImage] = useState(null);
   const [quantity, setQuantity] = useState('');
   const [billItems, setBillItems] = useState([]);
   
@@ -42,10 +45,19 @@ function Billing({ username }) {
   const [showImageViewer, setShowImageViewer] = useState(false);
   const [currentImageUrl, setCurrentImageUrl] = useState('');
   
+  // State for today's sales
+  const [todaySales, setTodaySales] = useState({ transactions: [], aggregatedItems: [], summary: {} });
+  const [showTodaySales, setShowTodaySales] = useState(false);
+  const [isLoadingSales, setIsLoadingSales] = useState(false);
+  
   // Refs
   const statusCheckIntervalRef = useRef(null);
   const transactionIdRef = useRef(null);
   const fileInputRef = useRef(null);
+  
+  // New item state
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemPrice, setNewItemPrice] = useState('');
   
   // Initialize component - fetch invoice number and items
   useEffect(() => {
@@ -107,6 +119,22 @@ function Billing({ username }) {
     }
   };
 
+  // Fetch today's sales
+  const fetchTodaySales = async () => {
+    setIsLoadingSales(true);
+    try {
+      const today = new Date().toISOString().split('T')[0]; // Get today's date in YYYY-MM-DD format
+      const response = await axios.get(`${API_BASE_URL}/today-sales?date=${today}`);
+      setTodaySales(response.data);
+      setShowTodaySales(true);
+    } catch (error) {
+      console.error('Error fetching today\'s sales:', error);
+      alert('Failed to fetch today\'s sales. Please try again.');
+    } finally {
+      setIsLoadingSales(false);
+    }
+  };
+
   // Calculate the total bill amount
   const calculateTotalAmount = () => {
     return billItems.reduce((total, item) => total + item.total, 0);
@@ -115,14 +143,30 @@ function Billing({ username }) {
   const totalAmount = calculateTotalAmount();
   // Add selected item to the bill
   const addItemToBill = () => {
-    if ((!selectedItem && !customItemName) || !quantity) {
-      alert('Please select or enter an item and enter quantity.');
+    if ((!selectedItem && !newItemName) || !quantity) {
+      alert('Please select or type an item and enter quantity.');
       return;
     }
 
-    const itemPrice = customItemName ? parseFloat(customItemPrice || '0') : selectedItem.price;
-    const itemImage = selectedItem ? selectedItem.imageUrl : null;
-    const itemName = customItemName || selectedItem.name;
+    let itemToAdd = selectedItem;
+
+    if (!selectedItem && newItemName) {
+      if (!newItemPrice) {
+        alert('Please enter a price for the new item.');
+        return;
+      }
+      // Just create a new item object, do not save to DB
+      itemToAdd = {
+        id: undefined,
+        name: newItemName,
+        price: parseFloat(newItemPrice),
+        imageUrl: null
+      };
+    }
+
+    const itemPrice = itemToAdd.price;
+    const itemImage = itemToAdd.imageUrl;
+    const itemName = itemToAdd.name;
     const quantityToAdd = parseInt(quantity);
     
     // Check if item already exists in the bill
@@ -157,9 +201,8 @@ function Billing({ username }) {
   const resetItemFields = () => {
     setQuantity('');
     setSelectedItem(null);
-    setCustomItemName('');
-    setCustomItemPrice('');
-    setCustomItemImage(null);
+    setNewItemName('');
+    setNewItemPrice('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -200,6 +243,52 @@ function Billing({ username }) {
     transactionIdRef.current = null;
   };
 
+  // Handle payment completion and save invoice
+  const handlePaymentComplete = async () => {
+    if (isLoadingInvoiceNumber) {
+      alert("Invoice number is still loading. Please wait a moment.");
+      return;
+    }
+    
+    if (!invoiceNumber) {
+      alert("Invalid invoice number. Please refresh the page and try again.");
+      return;
+    }
+    
+    // Prepare invoice data
+    const invoiceData = {
+      invoiceNumber,
+      seller: username,
+      date: new Date().toISOString(),
+      items: billItems,
+      totalAmount,
+      paymentMethod,
+      transactionId: paymentMethod === "online" ? transactionIdRef.current : null,
+      amountGiven: paymentMethod === "cash" ? parseFloat(amountGiven) : null,
+      exchange: paymentMethod === "cash" ? exchange : null,
+      cashier: username
+    };
+  
+    try {
+      // Save invoice to database
+      const response = await axios.post(`${API_BASE_URL}/save-invoice`, invoiceData);
+  
+      if (response.status !== 201) {
+        throw new Error("Failed to save invoice to the database.");
+      }
+      
+      // Generate and print PDF
+      generateInvoicePDF(invoiceData);
+      
+      // Reset the form for a new bill
+      refreshBill();
+      
+    } catch (error) {
+      console.error("Error saving invoice:", error);
+      alert("Failed to save invoice. Please try again.");
+    }
+  };
+
   // Calculate exchange amount for cash payments
   const calculateExchange = () => {
     if (!amountGiven) {
@@ -209,14 +298,14 @@ function Billing({ username }) {
     const exchangeAmount = parseFloat(amountGiven) - totalAmount;
     setExchange(exchangeAmount);
     
-    // Show feedback message
-    if (exchangeAmount === 0) {
-      alert('Amount is exact! No change needed.');
-    } else if (exchangeAmount < 0) {
+    // If exchange is valid, automatically save the invoice
+    if (exchangeAmount >= 0) {
+      handlePaymentComplete();
+    } else {
       alert('Amount given is less than the total amount!');
     }
   };
-  
+
   // Fetch FonePay QR code for online payment
   const fetchFonePayQR = async () => {
     try {
@@ -249,37 +338,8 @@ function Billing({ username }) {
     // For demo purposes, we'll simulate a successful payment after 5 seconds
     statusCheckIntervalRef.current = setTimeout(() => {
       setQrStatus(QR_STATES.PAID);
+      handlePaymentComplete(); // Automatically save invoice when online payment is complete
     }, 5000);
-  };
-
-  // Save custom item with image to database
-  const saveCustomItem = async () => {
-    if (!customItemName || !customItemPrice || !customItemImage) {
-      alert('Please enter item name, price, and select an image.');
-      return;
-    }
-
-    try {
-      const formData = new FormData();
-      formData.append('name', customItemName);
-      formData.append('price', customItemPrice);
-      formData.append('image', customItemImage);
-
-      const response = await axios.post(`${API_BASE_URL}/add-item`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
-      });
-
-      if (response.status === 201) {
-        alert('Item added successfully!');
-        fetchItems(); // Refresh the items list
-        resetItemFields();
-      }
-    } catch (error) {
-      console.error('Error saving custom item:', error);
-      alert('Failed to save item. Please try again.');
-    }
   };
 
   // Generate PDF and save invoice
@@ -309,26 +369,27 @@ function Billing({ username }) {
     };
   
     try {
-      // Save invoice to database
-      const response = await axios.post(`${API_BASE_URL}/save-invoice`, invoiceData);
+      // Generate PDF document
+      const pdfBlob = generateInvoicePDF(invoiceData);
+      
+      // Create form data to send both invoice data and PDF
+      const formData = new FormData();
+      formData.append('invoice', JSON.stringify(invoiceData));
+      formData.append('pdf', pdfBlob, `invoice_${invoiceData.invoiceNumber}.pdf`);
+      
+      // Save invoice and PDF to database
+      const response = await axios.post(`${API_BASE_URL}/save-invoice`, formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      });
   
       if (response.status !== 201) {
         throw new Error("Failed to save invoice to the database.");
       }
   
-      // Ask the user if they want to print the invoice
-      const userConfirmed = window.confirm("Do you want to print the invoice?");
-      
-      if (!userConfirmed) {
-        refreshBill(); // Reset the form for a new bill
-        return; // Stop here if the user doesn't want to print
-      }
-      
-      // Generate PDF document
-      generateInvoicePDF(invoiceData);
-      
-      // After successful printing, reset the form for a new bill
-      refreshBill();
+      // Backend will handle the printing after saving invoice
+      refreshBill(); // Reset the form for a new bill
       
     } catch (error) {
       console.error("Error saving invoice:", error);
@@ -336,111 +397,123 @@ function Billing({ username }) {
     }
   };
   
-  // Generate PDF invoice
+  // Generate PDF invoice and open print dialog
   const generateInvoicePDF = (invoiceData) => {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.height;
-
     const pageWidth = doc.internal.pageSize.width;
     const centerX = pageWidth / 2;
+    let yPosition = 20;
 
-    // Store Info - Centered with larger title
+    // Header - Company Info
     doc.setFont("Helvetica", "bold");
-    doc.setFontSize(18);
-    doc.text("New Rochak Khadya Udhyog", centerX, 20, { align: "center" });
+    doc.setFontSize(20);
+    doc.text("New Rochak Khadya Udhyog", centerX, yPosition, { align: "center" });
     
-    doc.setFont("Helvetica", "normal");
+    yPosition += 10;
+    doc.setFontSize(12);
+    doc.text("Bharatpur-7, Chitwan", centerX, yPosition, { align: "center" });
+    
+    // Contact Info
+    yPosition += 8;
     doc.setFontSize(10);
-    doc.text("Bharatpur-7,Chitwan", centerX, 30, { align: "center" });
+    doc.text("Mobile: 9845068407", centerX, yPosition, { align: "center" });
+    yPosition += 6;
+    doc.text("PAN: 605233483", centerX, yPosition, { align: "center" });
     
-    // Mobile, PAN, and ESTIMATE labels in bold, values in normal - all centered
-    doc.setFont("Helvetica", "bold");
-    doc.text("Mobile:", centerX - 20, 35);
-    doc.setFont("Helvetica", "normal");
-    doc.text("9845068407", centerX + 15, 35);
-    
-    doc.setFont("Helvetica", "bold");
-    doc.text("PAN:", centerX - 15, 40);
-    doc.setFont("Helvetica", "normal");
-    doc.text("605233483", centerX + 10, 40);
-    
-    doc.setFont("Helvetica", "bold");
+    // Bill Title
+    yPosition += 10;
     doc.setFontSize(16);
-    doc.text("Estimate", centerX, 48, { align: "center" });
+    doc.text("INVOICE", centerX, yPosition, { align: "center" });
 
-    // Invoice Details - Left aligned
-    doc.setFont("Helvetica", "bold");
+    // Invoice Details Box
+    yPosition += 15;
     doc.setFontSize(10);
-    doc.text("Date:", 20, 55);
-    doc.text("Invoice No:", 20, 60);
-    doc.text("Cashier:", 20, 65);
-    
-    doc.setFont("Helvetica", "normal");
-    doc.text(new Date().toLocaleDateString(), 60, 55);
-    doc.text(invoiceNumber, 60, 60);
-    doc.text(username, 60, 65);
+    doc.setDrawColor(200, 200, 200);
+    doc.rect(15, yPosition - 5, pageWidth - 30, 25);
 
+    // Left side details
+    doc.setFont("Helvetica", "bold");
+    doc.text("Invoice No:", 20, yPosition);
+    doc.text("Date:", 20, yPosition + 8);
+    
+    // Right side details
+    doc.text("Cashier:", pageWidth - 80, yPosition);
+    doc.text("Payment:", pageWidth - 80, yPosition + 8);
+
+    // Values in normal font
+    doc.setFont("Helvetica", "normal");
+    doc.text(invoiceNumber, 60, yPosition);
+    doc.text(new Date().toLocaleString(), 60, yPosition + 8);
+    doc.text(username, pageWidth - 40, yPosition);
+    doc.text(paymentMethod.toUpperCase(), pageWidth - 40, yPosition + 8);
+
+    // Items Table
+    yPosition += 25;
+    doc.setFillColor(240, 240, 240);
+    doc.rect(15, yPosition - 5, pageWidth - 30, 10, 'F');
+    
     // Table Headers
-    let yPosition = 75;
     doc.setFont("Helvetica", "bold");
     doc.text("#", 20, yPosition);
-    doc.text("Product", 30, yPosition);
-    doc.text("Qty", 90, yPosition);
-    doc.text("Unit Price", 110, yPosition);
-    doc.text("Subtotal", 150, yPosition);
-    
-    // Draw line under headers
-    doc.line(20, yPosition + 2, 190, yPosition + 2);
+    doc.text("Item Description", 35, yPosition);
+    doc.text("Qty", 120, yPosition);
+    doc.text("Rate", 140, yPosition);
+    doc.text("Amount", 170, yPosition);
 
     // Table Content
-    doc.setFont("Helvetica", "normal");
     yPosition += 10;
+    doc.setFont("Helvetica", "normal");
+    
     billItems.forEach((item, index) => {
+      // Add new page if needed
+      if (yPosition > pageHeight - 60) {
+        doc.addPage();
+        yPosition = 20;
+      }
+
       doc.text(`${index + 1}`, 20, yPosition);
-      doc.text(item.name, 30, yPosition);
-      doc.text(`${item.quantity}`, 90, yPosition);
-      doc.text(`Rs. ${item.price.toFixed(2)}`, 110, yPosition);
-      doc.text(`Rs. ${item.total.toFixed(2)}`, 150, yPosition);
+      doc.text(item.name, 35, yPosition);
+      doc.text(item.quantity.toString(), 120, yPosition);
+      doc.text(`Rs. ${item.price.toFixed(2)}`, 140, yPosition);
+      doc.text(`Rs. ${item.total.toFixed(2)}`, 170, yPosition);
       yPosition += 8;
     });
 
-    // Draw line after items
+    // Summary Box
     yPosition += 5;
-    doc.line(20, yPosition, 190, yPosition);
-    yPosition += 10;
+    doc.setDrawColor(200, 200, 200);
+    doc.rect(15, yPosition - 5, pageWidth - 30, 40);
 
-    // Totals
+    // Payment Summary
     doc.setFont("Helvetica", "bold");
-    doc.text("Subtotal:", 110, yPosition);
-    doc.text(`Rs. ${totalAmount.toFixed(2)}`, 150, yPosition);
+    doc.text("Total Amount:", 120, yPosition);
+    doc.text(`Rs. ${totalAmount.toFixed(2)}`, 170, yPosition);
     yPosition += 8;
 
-
-    // Payment info
-    doc.setFont("Helvetica", "normal");
     if (paymentMethod === 'cash') {
-      doc.text(`Cash (${new Date().toLocaleDateString()})`, 20, yPosition);
-      doc.text(`Rs. ${amountGiven}`, 110, yPosition);
+      const givenAmount = parseFloat(amountGiven);
+      const changeAmount = givenAmount - totalAmount;
+      
+      doc.text("Amount Given:", 120, yPosition);
+      doc.text(`Rs. ${givenAmount.toFixed(2)}`, 170, yPosition);
       yPosition += 8;
-      doc.text("Total Paid:", 20, yPosition);
-      doc.text(`Rs. ${amountGiven}`, 110, yPosition);
-      yPosition += 8;
-      doc.text("Change:", 20, yPosition);
-      doc.text(`Rs. ${exchange.toFixed(2)}`, 110, yPosition);
+      doc.text("Change:", 120, yPosition);
+      doc.text(`Rs. ${Math.max(0, changeAmount).toFixed(2)}`, 170, yPosition);
     } else {
-      doc.text(`Online Payment (${new Date().toLocaleDateString()})`, 20, yPosition);
-      doc.text(`Rs. ${totalAmount.toFixed(2)}`, 110, yPosition);
-      yPosition += 8;
-      doc.text("Transaction ID:", 20, yPosition);
-      doc.text(transactionIdRef.current || 'N/A', 110, yPosition);
+      doc.text("Transaction ID:", 120, yPosition);
+      doc.setFont("Helvetica", "normal");
+      doc.text(transactionIdRef.current || 'N/A', 170, yPosition);
     }
 
-    // Notes
+    // Footer
     yPosition += 20;
-    doc.text("This invoice is only for internal use.", 20, yPosition);
+    doc.setFont("Helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text("Thank you for your business!", centerX, yPosition, { align: "center" });
 
-    // Save the PDF
-    doc.save(`Invoice_${invoiceNumber}.pdf`);
+    // Save PDF to send to backend
+    return doc.output('blob');
   };
   
   // Handle payment method selection
@@ -516,12 +589,6 @@ function Billing({ username }) {
         return (
           <div style={{ textAlign: 'center' }}>
             <p style={{ color: '#27ae60', fontWeight: 'bold', fontSize: '18px' }}>✅ Payment Successful!</p>
-            <button 
-              onClick={printBill} 
-              style={{ ...styles.button, ...styles.purpleButton, marginTop: '15px' }}
-            >
-              Print Bill (PDF)
-            </button>
           </div>
         );
       case QR_STATES.FAILED:
@@ -540,18 +607,20 @@ function Billing({ username }) {
     return (
       <div
         style={{
-          marginTop: '20px',
-          fontSize: '20px',
-          fontWeight: 'bold',
-          color: exchange < 0 ? '#e74c3c' : '#27ae60',
+          padding: '10px',
+          marginTop: '10px',
+          backgroundColor: exchange === 0 ? '#e8f5e9' : exchange > 0 ? '#fff3e0' : '#ffebee',
+          borderRadius: '4px',
           textAlign: 'center'
         }}
       >
-        {exchange < 0
-          ? `Balance Due: Rs. ${Math.abs(exchange)}`
-          : exchange > 0
-            ? `Exchange: Rs. ${exchange}`
-            : `Exchange: Rs. 0 😊`}
+        {exchange === 0 ? (
+          <div style={{ color: '#2e7d32' }}>✓ Amount is exact</div>
+        ) : exchange > 0 ? (
+          <div style={{ color: '#f57c00' }}>Change to return: Rs. {exchange.toFixed(2)}</div>
+        ) : (
+          <div style={{ color: '#c62828' }}>Amount is insufficient</div>
+        )}
       </div>
     );
   };
@@ -632,79 +701,74 @@ function Billing({ username }) {
         <div style={styles.formContainer}>
           <h3 style={{ margin: '0 0 20px 0' }}>Items</h3>
           
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Select Item or Type Item Name</label>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              <select
-                value={selectedItem ? selectedItem.id : ''}
-                onChange={(e) => {
-                  const selected = items.find((item) => item.id.toString() === e.target.value);
-                  setSelectedItem(selected);
-                  setCustomItemName(''); // Clear custom input when dropdown is used
-                }}
-                style={{ ...styles.input, marginBottom: '10px' }}
-              >
-                <option value="">-- Select an Item --</option>
-                {items.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name} - Rs. {item.price}
-                  </option>
-                ))}
-              </select>
-              
-              {/* Preview of selected item image */}
-              {selectedItem && selectedItem.imageUrl && (
-                <div style={{ marginBottom: '10px' }}>
-                  <img 
-                    src={selectedItem.imageUrl} 
-                    alt={selectedItem.name}
-                    style={{ 
-                      width: '100px', 
-                      height: '100px', 
-                      objectFit: 'cover',
-                      border: '1px solid #ddd',
-                      borderRadius: '4px',
-                      cursor: 'pointer'
-                    }}
-                    onDoubleClick={() => handleImageDoubleClick(selectedItem.imageUrl)}
-                  />
-                </div>
-              )}
+          <div style={{ marginBottom: '15px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <label style={{ ...styles.label, fontSize: '16px', marginBottom: '8px' }}>Select or Type Item</label>
+                <CreatableSelect
+                  options={items.map(item => ({ value: item, label: `${item.name} - Rs. ${item.price}` }))}
+                  value={selectedItem ? { value: selectedItem, label: `${selectedItem.name} - Rs. ${selectedItem.price}` } : (newItemName ? { value: { name: newItemName, price: newItemPrice }, label: `${newItemName}${newItemPrice ? ` - Rs. ${newItemPrice}` : ''}` } : null)}
+                  onChange={option => {
+                    if (option && option.__isNew__) {
+                      setSelectedItem(null);
+                      setNewItemName(option.label);
+                      setNewItemPrice('');
+                    } else if (option) {
+                      setSelectedItem(option.value);
+                      setNewItemName('');
+                      setNewItemPrice('');
+                    } else {
+                      setSelectedItem(null);
+                      setNewItemName('');
+                      setNewItemPrice('');
+                    }
+                  }}
+                  onInputChange={inputValue => {
+                    if (!items.some(item => item.name.toLowerCase() === inputValue.toLowerCase())) {
+                      setNewItemName(inputValue);
+                    } else {
+                      setNewItemName('');
+                    }
+                  }}
+                  placeholder="Select or type"
+                  isClearable
+                  styles={{
+                    container: base => ({ ...base, width: '100%' }),
+                    control: base => ({ ...base, ...styles.input, minHeight: '48px', height: '48px', fontSize: '18px', width: '100%' }),
+                    valueContainer: base => ({ ...base, height: '48px', padding: '0 12px' }),
+                    input: base => ({ ...base, fontSize: '18px' }),
+                    menu: base => ({ ...base, zIndex: 9999 })
+                  }}
+                  formatCreateLabel={inputValue => `Add new item: "${inputValue}"`}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <label style={{ ...styles.label, fontSize: '16px', marginBottom: '8px' }}>Price (Rs.)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={selectedItem ? selectedItem.price : newItemPrice}
+                  onChange={e => {
+                    if (!selectedItem) setNewItemPrice(e.target.value);
+                  }}
+                  style={{ ...styles.input, width: '100%', height: '48px', fontSize: '18px' }}
+                  readOnly={!!selectedItem}
+                  disabled={!selectedItem && !newItemName}
+                  placeholder="Price (Rs.)"
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <label style={{ ...styles.label, fontSize: '16px', marginBottom: '8px' }}>Quantity</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={quantity}
+                  onChange={(e) => handleNumericInput(e, setQuantity)}
+                  style={{ ...styles.input, width: '100%', height: '48px', fontSize: '18px' }}
+                  placeholder="Quantity"
+                />
+              </div>
             </div>
-            
-            {/* Input for Custom Item */}
-            <input
-              type="text"
-              placeholder="Or type a custom item name"
-              value={customItemName}
-              onChange={(e) => {
-                setCustomItemName(e.target.value);
-                setSelectedItem(null); // Clear dropdown when custom name is entered
-              }}
-              style={styles.input}
-            />
-          </div>
-
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Unit Price (Rs.)</label>
-            <input
-              type="number"
-              min="0"
-              value={customItemName ? customItemPrice : (selectedItem ? selectedItem.price : '')}
-              onChange={(e) => handleNumericInput(e, setCustomItemPrice)}
-              style={styles.input}
-              disabled={selectedItem !== null}
-            />
-          </div>
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Quantity</label>
-            <input
-              type="number"
-              min="0"
-              value={quantity}
-              onChange={(e) => handleNumericInput(e, setQuantity)}
-              style={styles.input}
-            />
           </div>
 
           <button
@@ -713,31 +777,36 @@ function Billing({ username }) {
           >
             Add Item to Bill
           </button>
-          
-          {customItemName && customItemPrice && customItemImage && (
-            <button
-              onClick={saveCustomItem}
-              style={{ 
-                ...styles.button, 
-                ...styles.orangeButton, 
-                marginTop: '10px' 
-              }}
-            >
-              Save as New Item
-            </button>
-          )}
         </div>
 
         {/* Bill Summary Section */}
         <div style={{ width: '600px' }}>
           <div style={styles.titleRow}>
             <h3 style={{ margin: '0' }}>Bill Summary</h3>
-            <button
-              onClick={refreshBill}
-              style={styles.refreshButton}
-            >
-              🔄 Reset
-            </button>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={fetchTodaySales}
+                disabled={isLoadingSales}
+                style={{
+                  ...styles.refreshButton,
+                  backgroundColor: '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  padding: '8px 16px',
+                  borderRadius: '4px',
+                  cursor: isLoadingSales ? 'not-allowed' : 'pointer',
+                  opacity: isLoadingSales ? 0.6 : 1
+                }}
+              >
+                {isLoadingSales ? '⏳ Loading...' : '📊 Total Sales'}
+              </button>
+              <button
+                onClick={refreshBill}
+                style={styles.refreshButton}
+              >
+                🔄 Reset
+              </button>
+            </div>
           </div>
           
           <div style={styles.invoiceInfo}>
@@ -770,6 +839,7 @@ function Billing({ username }) {
                             width: '40px', 
                             height: '40px', 
                             objectFit: 'cover',
+                            border: '1px solid #ddd',
                             borderRadius: '4px',
                             cursor: 'pointer'
                           }}
@@ -816,7 +886,7 @@ function Billing({ username }) {
             {billItems.length > 0 && (
               <div style={styles.paymentButtons}>
                 <button
-                  onClick={() => handlePaymentMethodChange('cash')}
+                  onClick={() => setPaymentMethod('cash')}
                   style={{
                     ...styles.paymentButton,
                     ...styles.cashButton,
@@ -827,14 +897,14 @@ function Billing({ username }) {
                 </button>
                 
                 <button
-                  onClick={() => handlePaymentMethodChange('online')}
+                  onClick={() => setPaymentMethod('online')}
                   style={{
                     ...styles.paymentButton,
                     ...styles.onlineButton,
                     ...(paymentMethod === 'online' ? styles.activeButton : {})
                   }}
                 >
-                  🌐 Online 
+                  🌐 Online
                 </button>
               </div>
             )}
@@ -842,24 +912,22 @@ function Billing({ username }) {
             {/* Cash Payment Section */}
             {paymentMethod === 'cash' && (
               <div style={styles.paymentSection}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Amount Given by Customer (Rs.)</label>
+                <div style={styles.amountInputContainer}>
                   <input
                     type="number"
-                    min="0"
                     value={amountGiven}
-                    onChange={(e) => handleNumericInput(e, setAmountGiven)}
-                    style={styles.input}
+                    onChange={(e) => setAmountGiven(e.target.value)}
+                    placeholder="Amount Given"
+                    style={styles.amountInput}
                   />
+                  <button
+                    onClick={calculateExchange}
+                    style={styles.calculateButton}
+                  >
+                    Calculate Change 💱
+                  </button>
                 </div>
-                <button
-                  onClick={calculateExchange}
-                  style={{ ...styles.button, ...styles.orangeButton, width: '100%' }}
-                >
-                  Calculate Exchange
-                </button>
-
-                {/* Show exchange information */}
+                
                 {amountGiven && (
                   <div style={{
                     padding: '10px',
@@ -877,18 +945,6 @@ function Billing({ username }) {
                     )}
                   </div>
                 )}
-                
-                {/* Print Button for Cash Payment */}
-                {exchange >= 0 && amountGiven && (
-                  <div style={{ textAlign: 'center', marginTop: '20px' }}>
-                    <button
-                      onClick={printBill}
-                      style={{ ...styles.button, ...styles.purpleButton }}
-                    >
-                      Print Bill (PDF)
-                    </button>
-                  </div>
-                )}
               </div>
             )}
             
@@ -901,6 +957,246 @@ function Billing({ username }) {
           </div>
         </div>
       </div>
+
+      {/* Today's Sales Modal */}
+      {showTodaySales && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 1000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            padding: '20px',
+            borderRadius: '8px',
+            maxWidth: '800px',
+            maxHeight: '80vh',
+            overflow: 'auto',
+            position: 'relative'
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '20px',
+              borderBottom: '2px solid #4CAF50',
+              paddingBottom: '10px'
+            }}>
+              <h2 style={{ margin: 0, color: '#4CAF50' }}>📊 Today's Sales Report</h2>
+              <button
+                onClick={() => setShowTodaySales(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '24px',
+                  cursor: 'pointer',
+                  color: '#666'
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {todaySales.transactions.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+                <div style={{ fontSize: '48px', marginBottom: '10px' }}>📭</div>
+                <h3>No sales found for today</h3>
+                <p>There are no transactions recorded for today's date.</p>
+              </div>
+            ) : (
+              <div>
+                <div style={{
+                  backgroundColor: '#f8f9fa',
+                  padding: '15px',
+                  borderRadius: '6px',
+                  marginBottom: '20px',
+                  border: '1px solid #e9ecef'
+                }}>
+                  <h3 style={{ margin: '0 0 10px 0', color: '#495057' }}>Summary</h3>
+                  <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#4CAF50' }}>
+                        {todaySales.transactions.length}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>Total Transactions</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#2196F3' }}>
+                        Rs. {todaySales.summary.totalRevenue.toFixed(2)}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>Total Revenue</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#FF9800' }}>
+                        {todaySales.summary.totalItems}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>Total Items Sold</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#9C27B0' }}>
+                        Rs. {(todaySales.summary.totalRevenue / todaySales.summary.totalTransactions).toFixed(2)}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>Average Sale</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ maxHeight: '500px', overflow: 'auto' }}>
+                  {/* Aggregated Items Section */}
+                  <div style={{
+                    border: '1px solid #dee2e6',
+                    borderRadius: '8px',
+                    marginBottom: '15px',
+                    overflow: 'hidden'
+                  }}>
+                    <div style={{
+                      backgroundColor: '#2196F3',
+                      color: 'white',
+                      padding: '12px 15px',
+                      fontWeight: 'bold',
+                      fontSize: '16px'
+                    }}>
+                      📊 Consolidated Items Sold Today
+                    </div>
+                    
+                    <div style={{ padding: '0' }}>
+                      <table style={{
+                        width: '100%',
+                        borderCollapse: 'collapse',
+                        fontSize: '14px'
+                      }}>
+                        <thead>
+                          <tr style={{ backgroundColor: '#f8f9fa' }}>
+                            <th style={{ padding: '12px', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Item Name</th>
+                            <th style={{ padding: '12px', textAlign: 'center', borderBottom: '1px solid #dee2e6' }}>Total Qty</th>
+                            <th style={{ padding: '12px', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>Unit Price</th>
+                            <th style={{ padding: '12px', textAlign: 'center', borderBottom: '1px solid #dee2e6' }}>Transactions</th>
+                            <th style={{ padding: '12px', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>Total Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {todaySales.aggregatedItems.map((item, itemIndex) => (
+                            <tr key={itemIndex} style={{
+                              backgroundColor: itemIndex % 2 === 0 ? '#ffffff' : '#f8f9fa',
+                              borderBottom: '1px solid #dee2e6'
+                            }}>
+                              <td style={{ padding: '12px', fontWeight: '500', color: '#495057' }}>
+                                {item.name}
+                              </td>
+                              <td style={{ padding: '12px', textAlign: 'center', color: '#6c757d', fontWeight: 'bold' }}>
+                                {item.quantity}
+                              </td>
+                              <td style={{ padding: '12px', textAlign: 'right', color: '#6c757d' }}>
+                                Rs. {item.price.toFixed(2)}
+                              </td>
+                              <td style={{ padding: '12px', textAlign: 'center' }}>
+                                <span style={{
+                                  padding: '4px 8px',
+                                  borderRadius: '12px',
+                                  fontSize: '12px',
+                                  fontWeight: 'bold',
+                                  backgroundColor: '#e3f2fd',
+                                  color: '#1976d2'
+                                }}>
+                                  {item.transactions}
+                                </span>
+                              </td>
+                              <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', color: '#4CAF50' }}>
+                                Rs. {item.total.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Transaction Details Section */}
+                  <div style={{
+                    border: '1px solid #dee2e6',
+                    borderRadius: '8px',
+                    overflow: 'hidden'
+                  }}>
+                    <div style={{
+                      backgroundColor: '#FF9800',
+                      color: 'white',
+                      padding: '12px 15px',
+                      fontWeight: 'bold',
+                      fontSize: '16px',
+                      cursor: 'pointer'
+                    }}
+                    onClick={() => {
+                      const detailsSection = document.getElementById('transaction-details');
+                      if (detailsSection) {
+                        detailsSection.style.display = detailsSection.style.display === 'none' ? 'block' : 'none';
+                      }
+                    }}>
+                      📋 Transaction Details (Click to toggle)
+                    </div>
+                    
+                    <div id="transaction-details" style={{ display: 'none' }}>
+                      {todaySales.transactions.map((sale, saleIndex) => (
+                        <div key={saleIndex} style={{
+                          borderBottom: '1px solid #dee2e6',
+                          padding: '10px 15px'
+                        }}>
+                          <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: '8px'
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                              <span style={{ fontWeight: 'bold', fontSize: '14px' }}>
+                                Invoice #{sale.invoiceNumber}
+                              </span>
+                              <span style={{ fontSize: '12px', color: '#6c757d' }}>
+                                {new Date(sale.date).toLocaleTimeString()}
+                              </span>
+                              <span style={{ fontSize: '12px', color: '#6c757d' }}>
+                                Cashier: {sale.seller}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <span style={{
+                                padding: '2px 6px',
+                                borderRadius: '8px',
+                                fontSize: '10px',
+                                fontWeight: 'bold',
+                                backgroundColor: sale.paymentMethod === 'cash' ? '#e8f5e9' : '#e3f2fd',
+                                color: sale.paymentMethod === 'cash' ? '#2e7d32' : '#1976d2'
+                              }}>
+                                {sale.paymentMethod.toUpperCase()}
+                              </span>
+                              <span style={{ fontWeight: 'bold', fontSize: '14px', color: '#4CAF50' }}>
+                                Rs. {sale.totalAmount.toFixed(2)}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                            Items: {sale.items.map(item => `${item.name} (${item.quantity})`).join(', ')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Image Viewer Modal */}
+      {showImageViewer && <ImageViewer />}
     </div>
   );
 }
